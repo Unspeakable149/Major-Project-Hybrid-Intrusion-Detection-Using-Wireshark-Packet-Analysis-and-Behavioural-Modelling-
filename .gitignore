@@ -41,3 +41,8 @@ Thumbs.db
 
 # Claude Code session data
 .claude/
+
+# Spec reference images and teaching plan (kept local only)
+image.png
+image (*).png
+Teaching Plan*.pdf
