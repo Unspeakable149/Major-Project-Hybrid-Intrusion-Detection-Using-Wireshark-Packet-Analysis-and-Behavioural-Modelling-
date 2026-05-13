@@ -38,19 +38,23 @@ foreach ($a in $requiredArtifacts) {
     }
 }
 
-try   { python -c "import pyinstaller" 2>$null }
-catch { }
-$pi = (Get-Command pyinstaller -ErrorAction SilentlyContinue)
-if (-not $pi) {
+$piCheck = python -c "import PyInstaller; print(PyInstaller.__version__)" 2>&1
+if ($LASTEXITCODE -ne 0) {
     Write-Host "[X] PyInstaller not found. Install with: pip install pyinstaller" -ForegroundColor Red
     exit 1
 }
+Write-Host "[+] PyInstaller $piCheck detected."
 
 $isccCandidates = @(
     "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
-    "C:\Program Files\Inno Setup 6\ISCC.exe"
+    "C:\Program Files\Inno Setup 6\ISCC.exe",
+    "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"
 )
 $iscc = $isccCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+if (-not $iscc) {
+    $onPath = Get-Command iscc -ErrorAction SilentlyContinue
+    if ($onPath) { $iscc = $onPath.Source }
+}
 if (-not $iscc) {
     Write-Host "[!] Inno Setup not found. PyInstaller bundle will build, but" -ForegroundColor Yellow
     Write-Host "    HybridIDS-Setup.exe will NOT be produced."
@@ -63,7 +67,7 @@ Write-Host "[1/2] Building PyInstaller bundle..." -ForegroundColor Cyan
 if (Test-Path build)             { Remove-Item -Recurse -Force build }
 if (Test-Path "dist\HybridIDS")  { Remove-Item -Recurse -Force "dist\HybridIDS" }
 
-pyinstaller installer\HybridIDS.spec --clean --noconfirm
+python -m PyInstaller installer\HybridIDS.spec --clean --noconfirm
 if ($LASTEXITCODE -ne 0) {
     Write-Host "[X] PyInstaller build failed." -ForegroundColor Red
     exit 1
