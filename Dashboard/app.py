@@ -1,10 +1,10 @@
-import streamlit as st
-import pandas as pd
-import numpy as np
-import time
+import os
 import sqlite3
 import subprocess
-import os
+import time
+
+import pandas as pd
+import streamlit as st
 import streamlit.components.v1 as components
 
 st.set_page_config(
@@ -41,6 +41,26 @@ st.markdown("""
     }
     .ip-label { font-family: monospace; font-size: 15px; color: #FF6B6B; font-weight: 600; }
     .blocked-label { font-family: monospace; font-size: 14px; color: #888; }
+    .reasoning-card {
+        background-color: #15151F;
+        border-left: 3px solid #4A6FA5;
+        border-radius: 4px;
+        padding: 12px 16px;
+        margin: 8px 0;
+        font-size: 13px;
+        color: #DDD;
+    }
+    .reasoning-card code { color: #FFB347; background: #0E0E18; padding: 1px 5px; border-radius: 3px; }
+    .status-pill {
+        display: inline-block;
+        padding: 2px 10px;
+        border-radius: 10px;
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.05em;
+    }
+    .status-online { background: #003A1F; color: #00E68A; }
+    .status-paused { background: #3A2000; color: #FFB347; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -112,10 +132,12 @@ def load_threat_logs():
         return pd.DataFrame()
 
 
-def get_model_label():
+def detection_engine_status():
     if os.path.exists("rf_model.pkl"):
-        return "Random Forest"
-    return "K-Means"
+        return "Hybrid (Behavioral ML + Signature Rules)"
+    if os.path.exists("advanced_kmeans_model.pkl"):
+        return "Hybrid (Anomaly Clustering + Signature Rules)"
+    return "Signature Rules Only"
 
 
 def highlight_threat_row(row):
@@ -134,7 +156,7 @@ def highlight_threat_row(row):
 
 
 st.title("Hybrid Intrusion Detection System")
-st.caption("Real-time behavioral analysis powered by Wireshark packet capture and machine learning")
+st.caption("Real-time network behavioral analysis with hybrid signature + machine learning detection")
 
 tab1, tab2 = st.tabs(["Live SOC Dashboard", "Educational Simulator"])
 
@@ -142,16 +164,37 @@ with tab1:
     st.sidebar.header("Monitoring Controls")
     enable_live = st.sidebar.checkbox("Enable Live Monitoring", value=False)
     refresh_rate = st.sidebar.selectbox("Refresh Interval (seconds)", [2, 5, 10, 30], index=1)
+    severity_filter = st.sidebar.multiselect(
+        "Show severity levels",
+        options=["Severe", "Moderate", "Baseline"],
+        default=["Severe", "Moderate", "Baseline"],
+    )
     st.sidebar.markdown("---")
-    st.sidebar.caption(f"Active Model: **{get_model_label()}**")
-    st.sidebar.caption("Run `trainai_rf.py` to upgrade to Random Forest if K-Means is shown.")
+    status_class = "status-online" if enable_live else "status-paused"
+    status_text = "MONITORING" if enable_live else "PAUSED"
+    st.sidebar.markdown(
+        f'<span class="status-pill {status_class}">{status_text}</span>',
+        unsafe_allow_html=True,
+    )
+    st.sidebar.caption(f"Detection Engine: {detection_engine_status()}")
 
     if enable_live:
         logs_df = load_threat_logs()
 
         if logs_df.empty:
-            st.info("Database connected. Waiting for the backend engine to capture packets...")
+            st.info("Connected to alert database. Waiting for network telemetry...")
         else:
+            def severity_of(value: str) -> str:
+                if "Severe" in str(value):
+                    return "Severe"
+                if "Moderate" in str(value):
+                    return "Moderate"
+                return "Baseline"
+
+            logs_df["__sev__"] = logs_df["Threat Level"].map(severity_of)
+            filtered_df = logs_df[logs_df["__sev__"].isin(severity_filter)].drop(columns="__sev__")
+            logs_df = logs_df.drop(columns="__sev__")
+
             severe_mask = logs_df["Threat Level"] == "Severe (Critical Anomaly)"
             severe_df = logs_df[severe_mask]
             unique_sources = logs_df["Source IP"].nunique()
@@ -169,7 +212,7 @@ with tab1:
 
             with table_col:
                 st.markdown('<p class="threat-header">Live Network Telemetry</p>', unsafe_allow_html=True)
-                display_df = logs_df.head(100)
+                display_df = filtered_df.head(100)
                 try:
                     st.dataframe(
                         display_df.style.apply(highlight_threat_row, axis=1),
@@ -178,6 +221,14 @@ with tab1:
                     )
                 except Exception:
                     st.dataframe(display_df, use_container_width=True, height=420)
+
+                csv_bytes = filtered_df.to_csv(index=False).encode("utf-8")
+                st.download_button(
+                    label="Export Filtered Logs (CSV)",
+                    data=csv_bytes,
+                    file_name=f"ids_threat_logs_{int(time.time())}.csv",
+                    mime="text/csv",
+                )
 
             with chart_col:
                 st.markdown('<p class="threat-header">Threat Distribution</p>', unsafe_allow_html=True)
@@ -189,6 +240,21 @@ with tab1:
                 top_ips = logs_df["Source IP"].value_counts().head(5).reset_index()
                 top_ips.columns = ["Source IP", "Flows"]
                 st.dataframe(top_ips, use_container_width=True, hide_index=True)
+
+            st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
+            st.markdown('<p class="threat-header">Threat Activity Timeline</p>', unsafe_allow_html=True)
+
+            timeline_df = logs_df.copy()
+            timeline_df["Severity"] = timeline_df["Threat Level"].map(
+                lambda v: "Severe" if "Severe" in str(v) else ("Moderate" if "Moderate" in str(v) else "Baseline")
+            )
+            timeline_pivot = (
+                timeline_df.groupby(["Time", "Severity"]).size().unstack(fill_value=0).sort_index()
+            )
+            for sev in ["Severe", "Moderate", "Baseline"]:
+                if sev not in timeline_pivot.columns:
+                    timeline_pivot[sev] = 0
+            st.line_chart(timeline_pivot[["Severe", "Moderate", "Baseline"]])
 
             st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
             st.markdown('<p class="threat-header">One-Click Threat Mitigation</p>', unsafe_allow_html=True)
@@ -218,7 +284,10 @@ with tab1:
                                 st.session_state.blocked_ips[ip] = True
                                 st.success(f"Firewall rule applied. Inbound traffic from {ip} is now blocked.")
                             else:
-                                st.error(f"Failed to apply firewall rule for {ip}. The dashboard must be run as Administrator.")
+                                st.error(
+                                    f"Unable to apply firewall rule for {ip}. "
+                                    f"Administrator privileges required."
+                                )
             elif severe_ips:
                 st.success("All detected critical threat sources have been mitigated.")
             else:
@@ -250,7 +319,10 @@ with tab1:
                             st.success(f"Firewall rule removed. {ip_to_unblock} is now unblocked.")
                             st.rerun()
                         else:
-                            st.error(f"Could not remove the rule for {ip_to_unblock}. Verify administrator privileges.")
+                            st.error(
+                                f"Could not remove the rule for {ip_to_unblock}. "
+                                f"Administrator privileges required."
+                            )
 
         time.sleep(refresh_rate)
         st.rerun()
@@ -260,30 +332,74 @@ with tab1:
         st.markdown("---")
         st.markdown("**System Overview**")
         col_a, col_b, col_c = st.columns(3)
-        col_a.markdown("**Capture Engine**\n\ntshark.exe — 2-second micro-batch capture windows")
-        col_b.markdown("**Classification Model**\n\n" + get_model_label() + " — behavioral flow analysis")
-        col_c.markdown("**Storage Backend**\n\nSQLite — persistent embedded threat log")
+        col_a.markdown("**Capture Layer**\n\nLive packet capture across the active network interface in 2-second windows.")
+        col_b.markdown("**Detection Layer**\n\n" + detection_engine_status() + " with multi-window correlation.")
+        col_c.markdown("**Response Layer**\n\nOne-click firewall isolation and persistent alert logging.")
 
 
 with tab2:
     st.subheader("Network Traffic and Attack Simulator")
-    st.markdown("Select a network scenario to visualize how packets behave under different conditions.")
+    st.markdown("Visualize how different network behaviors trigger the detection engine.")
 
     scenario = st.radio(
         "Select Scenario:",
-        ("Normal Web Browsing", "Reconnaissance (Port Scan)", "DDoS Flood"),
+        ("Normal Web Browsing", "Reconnaissance (Port Scan)", "DDoS Flood",
+         "Brute-Force Login", "C2 Beacon (Stealth)"),
         horizontal=True
     )
 
     if scenario == "Normal Web Browsing":
         sim_mode = "normal"
-        st.success("AI Classification: BASELINE — Standard web traffic pattern detected. No anomaly.")
+        st.success("Classification: BASELINE — Standard web traffic pattern. No anomaly detected.")
+        reasoning = [
+            ("packets/sec", "low", "well below the 300 pps moderate threshold"),
+            ("syn_ack_ratio", "~1.0", "balanced — every SYN is acknowledged"),
+            ("unique_dest_ports", "1–3", "far below the 20-port scan threshold"),
+            ("traffic_profile", "Standard Web Traffic", "no rule matched"),
+        ]
     elif scenario == "Reconnaissance (Port Scan)":
         sim_mode = "scan"
-        st.warning("AI Classification: MODERATE — Sequential port probing detected across multiple destination ports.")
-    else:
+        st.warning("Classification: MODERATE — Sequential port probing across many destination ports.")
+        reasoning = [
+            ("unique_dest_ports", "> 20", "triggers `ports > 20` Port Scan rule"),
+            ("packets/sec", "moderate", "sustained probing, not flood-level"),
+            ("syn_ack_ratio", "elevated", "many SYNs sent, few ACKs returned (closed ports)"),
+            ("traffic_profile", "Port Scan / Reconnaissance", "Moderate severity"),
+        ]
+    elif scenario == "DDoS Flood":
         sim_mode = "ddos"
-        st.error("AI Classification: SEVERE — Extreme SYN packet rate with anomalous SYN/ACK ratio. Critical threat.")
+        st.error("Classification: SEVERE — Extreme SYN packet rate with anomalous SYN/ACK ratio.")
+        reasoning = [
+            ("packets/sec", "> 500", "triggers high-volume flood rule"),
+            ("syn_ack_ratio", "> 5", "overwhelming SYNs vs returning ACKs"),
+            ("total_syn_flags", "very high", "SYN flood signature"),
+            ("traffic_profile", "DDoS SYN Flood", "Severe — fusion engine picks max severity"),
+        ]
+    elif scenario == "Brute-Force Login":
+        sim_mode = "brute"
+        st.warning("Classification: MODERATE — Sustained authentication attempts across many windows.")
+        reasoning = [
+            ("rolling_syn (30s)", "> 150", "multi-window slow-attack detector trips"),
+            ("packets/sec (single window)", "low", "below the 500 pps single-window flood threshold"),
+            ("unique_dest_ports", "1", "all targeting one auth port (e.g. 22 / 3389)"),
+            ("traffic_profile", "Sustained SYN / Brute-Force Probe", "caught by rolling-state layer"),
+        ]
+    else:
+        sim_mode = "c2"
+        st.warning("Classification: MODERATE — Low-and-slow periodic beacon, likely command-and-control.")
+        reasoning = [
+            ("packets/sec", "very low", "stealth — single-window heuristic alone misses this"),
+            ("iat_std", "near 0", "highly regular beacon interval (telemetry-like rhythm)"),
+            ("unique_dest_ips", "1", "single hard-coded callback host"),
+            ("detection path", "ML + rolling state", "ML flags rhythmic IAT pattern as suspicious"),
+        ]
+
+    reasoning_html = "".join(
+        f'<div class="reasoning-card"><b>{label}</b>: <code>{value}</code> — {note}</div>'
+        for label, value, note in reasoning
+    )
+    st.markdown("**Detection Reasoning**", help="Which feature values trigger which rule path.")
+    st.markdown(reasoning_html, unsafe_allow_html=True)
 
     html_code = f"""
     <!DOCTYPE html>
@@ -318,9 +434,11 @@ with tab2:
         <div id="legend">
             <span><span class="dot" style="background:#00FFAA;"></span>Safe (Port 80/443)</span>
             &nbsp;&nbsp;
-            <span><span class="dot" style="background:#FFCC00;"></span>Probe (Sequential Port)</span>
+            <span><span class="dot" style="background:#FFCC00;"></span>Probe / Brute-Force</span>
             &nbsp;&nbsp;
-            <span><span class="dot" style="background:#FF3333;"></span>SYN Flood (Port 80)</span>
+            <span><span class="dot" style="background:#FF3333;"></span>SYN Flood</span>
+            &nbsp;&nbsp;
+            <span><span class="dot" style="background:#9B6BFF;"></span>C2 Beacon</span>
         </div>
         <script>
             const canvas = document.getElementById('networkCanvas');
@@ -344,7 +462,7 @@ with tab2:
                     this.targetX = nodes.firewall.x;
                     this.targetY = nodes.firewall.y;
                     this.stage = 1;
-                    this.speed = (mode === 'ddos') ? 9 : 4;
+                    this.speed = (mode === 'ddos') ? 9 : (mode === 'c2' ? 3 : 4);
                     this.alpha = 1.0;
                     if (mode === 'normal') {{
                         this.port = Math.random() > 0.5 ? 80 : 443;
@@ -355,10 +473,18 @@ with tab2:
                         if (scanPort > 1024) scanPort = 1;
                         this.color = "#FFCC00";
                         this.radius = 3;
-                    }} else {{
+                    }} else if (mode === 'ddos') {{
                         this.port = 80;
                         this.color = "#FF3333";
                         this.radius = 5;
+                    }} else if (mode === 'brute') {{
+                        this.port = (Math.random() > 0.5) ? 22 : 3389;
+                        this.color = "#FFCC00";
+                        this.radius = 4;
+                    }} else {{
+                        this.port = 443;
+                        this.color = "#9B6BFF";
+                        this.radius = 4;
                     }}
                 }}
 
@@ -426,6 +552,14 @@ with tab2:
                 ctx.stroke();
             }}
 
+            function spawnRateFor(mode) {{
+                if (mode === 'ddos') return 0.85;
+                if (mode === 'scan') return 0.25;
+                if (mode === 'brute') return 0.12;
+                if (mode === 'c2') return 0.0;  // beacon uses fixed-interval spawning
+                return 0.04;
+            }}
+
             function animate() {{
                 ctx.clearRect(0, 0, canvas.width, canvas.height);
                 frameCount++;
@@ -435,13 +569,13 @@ with tab2:
                 drawNode(nodes.firewall, "#1A2A1A", "#3A7A3A");
                 drawNode(nodes.server,   "#2A1A1A", "#7A2A2A");
 
-                const spawnRate = (mode === 'ddos') ? 0.85 : (mode === 'scan') ? 0.18 : 0.04;
                 const burstCount = (mode === 'ddos') ? 4 : 1;
 
-                if (Math.random() < spawnRate) {{
-                    for (let i = 0; i < burstCount; i++) {{
-                        packets.push(new Packet());
-                    }}
+                // C2 beacon: fire a single packet every ~90 frames (regular cadence).
+                if (mode === 'c2') {{
+                    if (frameCount % 90 === 0) packets.push(new Packet());
+                }} else if (Math.random() < spawnRateFor(mode)) {{
+                    for (let i = 0; i < burstCount; i++) packets.push(new Packet());
                 }}
 
                 for (let i = packets.length - 1; i >= 0; i--) {{
@@ -466,10 +600,21 @@ with tab2:
     st.markdown("---")
     st.markdown("**Behavioral Signatures by Scenario**")
     sig_data = {
-        "Scenario": ["Normal Web Browsing", "Reconnaissance (Port Scan)", "DDoS SYN Flood"],
-        "Typical Packets/Sec": ["< 5", "10 — 50", "> 500"],
-        "Unique Dest Ports": ["1 — 3", "> 20", "1"],
-        "SYN/ACK Ratio": ["~1.0", "~1.2", "> 5.0"],
-        "Threat Classification": ["Baseline (Safe)", "Moderate (Suspicious)", "Severe (Critical Anomaly)"]
+        "Scenario": [
+            "Normal Web Browsing", "Reconnaissance (Port Scan)", "DDoS SYN Flood",
+            "Brute-Force Login", "C2 Beacon (Stealth)"
+        ],
+        "Typical Packets/Sec": ["< 5", "10 — 50", "> 500", "low (sustained)", "very low (periodic)"],
+        "Unique Dest Ports": ["1 — 3", "> 20", "1", "1 (22 / 3389)", "1 (443)"],
+        "SYN/ACK Ratio": ["~1.0", "~1.2", "> 5.0", "elevated", "~1.0"],
+        "Detection Path": [
+            "Rules", "Rules", "Rules + ML",
+            "Rolling multi-window state",
+            "ML pattern + rolling state"
+        ],
+        "Threat Classification": [
+            "Baseline (Safe)", "Moderate (Suspicious)", "Severe (Critical Anomaly)",
+            "Moderate (Suspicious)", "Moderate (Suspicious)"
+        ]
     }
     st.dataframe(pd.DataFrame(sig_data), use_container_width=True, hide_index=True)

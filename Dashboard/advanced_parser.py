@@ -1,93 +1,98 @@
+"""Parse PCAP files via tshark into a single packet-level CSV dataset.
+
+Run before feature_engineer.py. Set MAX_FILES=None to process the full bulk
+PCAP corpus; the default cap keeps dry runs fast.
+"""
+
 import os
 import subprocess
 import pandas as pd
 import glob
 import warnings
 
-# Suppress pandas warnings for cleaner terminal output
 warnings.filterwarnings("ignore")
 
-# 1. Define your folders
-PCAP_FOLDER = r"Bulk PCAPS"
+PCAP_FOLDER = os.environ.get("IDS_PCAP_FOLDER", r"Bulk PCAPS")
 TEMP_CSV_FOLDER = "Temp_CSVs"
 MASTER_CSV = "master_advanced_dataset.csv"
-TSHARK_PATH = r"C:\Program Files\Wireshark\tshark.exe"
+TSHARK_PATH = os.environ.get("TSHARK_PATH", r"C:\Program Files\Wireshark\tshark.exe")
+MAX_FILES = 2  # set to None to parse every PCAP
 
-if not os.path.exists(TEMP_CSV_FOLDER):
-    os.makedirs(TEMP_CSV_FOLDER)
+TSHARK_FIELDS = [
+    "frame.time_epoch",
+    "ip.src", "ip.dst",
+    "tcp.srcport", "udp.srcport", "tcp.dstport", "udp.dstport",
+    "_ws.col.Protocol", "frame.len",
+    "tcp.flags.syn", "tcp.flags.ack", "tcp.flags.fin", "tcp.flags.reset",
+    "ip.ttl", "tcp.window_size",
+]
 
-# Find PCAP files (Remove the '[:2]' when you want to parse ALL 15GB)
-all_pcap_files = glob.glob(f"{PCAP_FOLDER}\\*.pcap")
-pcap_files = all_pcap_files[:2] 
+COLUMN_NAMES = [
+    "Timestamp", "Source IP", "Dest IP",
+    "TCP Src", "UDP Src", "TCP Dst", "UDP Dst",
+    "Protocol", "Packet Size",
+    "SYN Flag", "ACK Flag", "FIN Flag", "RST Flag",
+    "TTL", "Window Size",
+]
 
-print(f"Found {len(all_pcap_files)} total PCAP files.")
-print("Starting ADVANCED Deep-Packet Extraction...\n")
 
-# 2. Extract Deep Features using tshark
-for pcap in pcap_files:
-    base_name = os.path.basename(pcap).replace('.pcap', '')
-    output_csv = f"{TEMP_CSV_FOLDER}/{base_name}.csv"
-    
-    print(f"Ripping deep features from {base_name}.pcap...")
-    
-    # We are now asking tshark for TCP Flags, Windows Sizes, TTL, and both TCP/UDP ports
-    tshark_command = [
-        TSHARK_PATH, "-r", pcap, 
-        "-T", "fields",
-        "-e", "frame.time_epoch",
-        "-e", "ip.src", "-e", "ip.dst",
-        "-e", "tcp.srcport", "-e", "udp.srcport",
-        "-e", "tcp.dstport", "-e", "udp.dstport",
-        "-e", "_ws.col.Protocol", "-e", "frame.len",
-        "-e", "tcp.flags.syn", "-e", "tcp.flags.ack", 
-        "-e", "tcp.flags.fin", "-e", "tcp.flags.reset",
-        "-e", "ip.ttl", "-e", "tcp.window_size",
-        "-E", "header=y", "-E", "separator=,", "-E", "quote=d"
-    ]
-    
-    with open(output_csv, "w") as outfile:
-        subprocess.run(tshark_command, stdout=outfile, stderr=subprocess.DEVNULL)
+def build_tshark_command(pcap_path: str) -> list:
+    cmd = [TSHARK_PATH, "-r", pcap_path, "-T", "fields"]
+    for field in TSHARK_FIELDS:
+        cmd += ["-e", field]
+    cmd += ["-E", "header=y", "-E", "separator=,", "-E", "quote=d"]
+    return cmd
 
-# 3. Merge and Clean with Pandas
-print("\nExtraction complete. Merging and cleaning massive dataset...")
-all_csv_files = glob.glob(f"{TEMP_CSV_FOLDER}/*.csv")
 
-dataframe_list = []
-for csv_file in all_csv_files:
-    try:
-        df = pd.read_csv(csv_file, on_bad_lines='skip')
-        
-        # Rename columns from tshark's raw output to something readable
-        df.columns = [
-            "Timestamp", "Source IP", "Dest IP", 
-            "TCP Src", "UDP Src", "TCP Dst", "UDP Dst", 
-            "Protocol", "Packet Size", 
-            "SYN Flag", "ACK Flag", "FIN Flag", "RST Flag", 
-            "TTL", "Window Size"
-        ]
-        dataframe_list.append(df)
-    except Exception as e:
-        pass
+def extract_pcap(pcap_path: str) -> None:
+    base = os.path.basename(pcap_path).replace('.pcap', '')
+    out_csv = os.path.join(TEMP_CSV_FOLDER, f"{base}.csv")
+    print(f"  extracting {base}.pcap")
+    with open(out_csv, "w", encoding="utf-8") as outfile:
+        subprocess.run(build_tshark_command(pcap_path), stdout=outfile, stderr=subprocess.DEVNULL)
 
-if dataframe_list:
-    master_df = pd.concat(dataframe_list, ignore_index=True)
-    
-    # CLEANING LOGIC: Combine TCP and UDP ports into a single 'Source Port' and 'Dest Port' column
-    master_df['Source Port'] = master_df['TCP Src'].fillna(master_df['UDP Src']).fillna(0)
-    master_df['Dest Port'] = master_df['TCP Dst'].fillna(master_df['UDP Dst']).fillna(0)
-    
-    # Drop the now-useless split port columns
-    master_df.drop(columns=['TCP Src', 'UDP Src', 'TCP Dst', 'UDP Dst'], inplace=True)
-    
-    # Fill empty TCP flags, TTLs, and Window sizes with 0 (For non-TCP packets)
+
+def merge_csvs() -> pd.DataFrame | None:
+    frames = []
+    for csv_file in glob.glob(os.path.join(TEMP_CSV_FOLDER, "*.csv")):
+        try:
+            df = pd.read_csv(csv_file, on_bad_lines='skip')
+            df.columns = COLUMN_NAMES
+            frames.append(df)
+        except Exception:
+            continue
+    if not frames:
+        return None
+
+    master = pd.concat(frames, ignore_index=True)
+    master['Source Port'] = master['TCP Src'].fillna(master['UDP Src']).fillna(0)
+    master['Dest Port'] = master['TCP Dst'].fillna(master['UDP Dst']).fillna(0)
+    master.drop(columns=['TCP Src', 'UDP Src', 'TCP Dst', 'UDP Dst'], inplace=True)
     fill_cols = ["SYN Flag", "ACK Flag", "FIN Flag", "RST Flag", "TTL", "Window Size"]
-    master_df[fill_cols] = master_df[fill_cols].fillna(0)
-    
-    # Drop corrupted rows missing IP addresses
-    master_df.dropna(subset=['Source IP', 'Dest IP'], inplace=True)
-    
-    # Save the final Super-Dataset
-    master_df.to_csv(MASTER_CSV, index=False)
-    print(f"\nSUCCESS! Advanced Master dataset saved as '{MASTER_CSV}' with {len(master_df)} rows and 13 data points per row!")
-else:
-    print("\nError: No data could be extracted.")
+    master[fill_cols] = master[fill_cols].fillna(0)
+    master.dropna(subset=['Source IP', 'Dest IP'], inplace=True)
+    return master
+
+
+def main():
+    os.makedirs(TEMP_CSV_FOLDER, exist_ok=True)
+
+    all_pcaps = glob.glob(os.path.join(PCAP_FOLDER, "*.pcap"))
+    pcaps = all_pcaps if MAX_FILES is None else all_pcaps[:MAX_FILES]
+    print(f"Discovered {len(all_pcaps)} PCAP files, processing {len(pcaps)}.\n")
+
+    for pcap in pcaps:
+        extract_pcap(pcap)
+
+    print("\nMerging per-file CSVs into master dataset...")
+    master = merge_csvs()
+    if master is None:
+        print("ERROR: no data extracted; verify tshark path and PCAP integrity.")
+        return
+
+    master.to_csv(MASTER_CSV, index=False)
+    print(f"\nSUCCESS. {MASTER_CSV} written: {len(master):,} rows, {master.shape[1]} columns.")
+
+
+if __name__ == "__main__":
+    main()
