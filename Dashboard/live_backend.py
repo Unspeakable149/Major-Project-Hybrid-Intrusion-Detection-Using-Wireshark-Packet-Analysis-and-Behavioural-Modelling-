@@ -21,6 +21,10 @@ import joblib
 
 warnings.filterwarnings("ignore")
 
+# Suppress console windows when subprocesses launch under a windowed (no-console)
+# frozen build. On non-Windows hosts this constant is 0 and a no-op.
+NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
 TSHARK_PATH = r"C:\Program Files\Wireshark\tshark.exe"
 WINDOW_SECONDS = 2
 DB_FILE = "ids_logs.db"
@@ -74,7 +78,10 @@ NUMERIC_COLS = ['Packet Size', 'TTL', 'Window Size', 'Timestamp']
 def get_wifi_interface() -> str:
     print("[*] Auto-detecting Wi-Fi interface...")
     try:
-        output = subprocess.check_output([TSHARK_PATH, "-D"], text=True, stderr=subprocess.DEVNULL)
+        output = subprocess.check_output(
+            [TSHARK_PATH, "-D"], text=True, stderr=subprocess.DEVNULL,
+            creationflags=NO_WINDOW,
+        )
         for line in output.split('\n'):
             if "wifi" in line.lower():
                 idx = line.split('.')[0]
@@ -191,6 +198,7 @@ def capture_window(interface: str) -> pd.DataFrame:
     subprocess.run(
         [TSHARK_PATH, "-i", interface, "-a", f"duration:{WINDOW_SECONDS}", "-w", "temp_live.pcap"],
         stderr=subprocess.DEVNULL,
+        creationflags=NO_WINDOW,
     )
 
     extract_cmd = [TSHARK_PATH, "-r", "temp_live.pcap", "-T", "fields"]
@@ -199,7 +207,10 @@ def capture_window(interface: str) -> pd.DataFrame:
     extract_cmd += ["-E", "header=y", "-E", "separator=,", "-E", "quote=d"]
 
     with open("temp_raw.csv", "w", encoding="utf-8") as outfile:
-        subprocess.run(extract_cmd, stdout=outfile, stderr=subprocess.DEVNULL)
+        subprocess.run(
+            extract_cmd, stdout=outfile, stderr=subprocess.DEVNULL,
+            creationflags=NO_WINDOW,
+        )
 
     return pd.read_csv("temp_raw.csv", low_memory=False)
 
