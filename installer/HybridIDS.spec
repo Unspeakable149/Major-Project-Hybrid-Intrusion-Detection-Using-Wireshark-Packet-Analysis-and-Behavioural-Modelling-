@@ -8,7 +8,7 @@
 import os
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules, copy_metadata
 
 block_cipher = None
 
@@ -46,6 +46,19 @@ for artifact in ("rf_model.pkl", "rf_scaler.pkl"):
 
 # Streamlit ships static assets that PyInstaller doesn't auto-detect.
 datas += collect_data_files("streamlit", include_py_files=False)
+
+# Streamlit + several deps call importlib.metadata.version("<pkg>") at import
+# time. Without these copies the frozen build raises PackageNotFoundError.
+for pkg in (
+    "streamlit", "altair", "pandas", "numpy", "pyarrow",
+    "click", "tornado", "rich", "packaging", "protobuf",
+    "pillow", "joblib", "scikit-learn", "scipy", "watchdog",
+    "gitpython", "pydeck", "tenacity", "toml", "typing_extensions",
+):
+    try:
+        datas += copy_metadata(pkg)
+    except Exception:
+        pass
 
 # Hidden imports Streamlit / sklearn / pandas rely on dynamically.
 hiddenimports = []

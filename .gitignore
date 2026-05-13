@@ -57,3 +57,9 @@ build/
 dist/
 installer/output/
 *.spec.bak
+
+# Installed app footprint (when user runs the installer locally)
+Hybrid IDS/
+
+# Launcher runtime log
+launcher.log
