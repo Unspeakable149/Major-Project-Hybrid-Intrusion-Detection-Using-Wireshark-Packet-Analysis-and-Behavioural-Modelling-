@@ -51,3 +51,9 @@ Major_Project_Direction.pdf
 
 # Local test reports (contain network/host specifics)
 TEST_RESULTS.md
+
+# Installer build artifacts (PyInstaller + Inno Setup output)
+build/
+dist/
+installer/output/
+*.spec.bak
