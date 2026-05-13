@@ -74,7 +74,18 @@ A real-time hybrid Intrusion Detection System (IDS) that combines rule-based sig
 | Behavioral | `unique_target_ips`, `unique_target_ports` |
 | Network-layer | `avg_ttl`, `avg_window_size` |
 
-## Running Locally
+## Distribution
+
+Two ways to run this project:
+
+| Option | Audience | What you get |
+|---|---|---|
+| **Web App (this repo)** | Developers, evaluators with Python | Clone, train, run via `start_system.bat`. Full source + retraining pipeline. |
+| **Installer EXE** (`installer/` folder builds it) | End users | Branded Windows installer `HybridIDS-Setup-*.exe`. Tray-icon launcher, no Python required. Available from the project's GitHub Releases page. |
+
+To build the installer locally, see [`installer/README.md`](installer/README.md).
+
+## Running Locally (Web App Mode)
 
 Requirements: Windows, Wireshark (with tshark at `C:\Program Files\Wireshark\tshark.exe`), Python 3.10+, packages: `pandas`, `numpy`, `scikit-learn`, `joblib`, `streamlit`.
 
