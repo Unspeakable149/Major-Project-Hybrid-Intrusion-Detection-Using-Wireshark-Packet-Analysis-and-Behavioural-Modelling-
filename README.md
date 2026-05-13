@@ -10,7 +10,7 @@ A real-time hybrid Intrusion Detection System (IDS) that combines rule-based sig
 [ tshark live capture (2s windows) ]
               |
               v
-[ Pandas flow engineering — 15 features per Source IP ]
+[ Pandas flow engineering — 18 features per Source IP ]
               |
        +------+------+
        |             |
@@ -32,10 +32,11 @@ A real-time hybrid Intrusion Detection System (IDS) that combines rule-based sig
 ### Training pipeline (offline, run once)
 | File | Purpose |
 |---|---|
-| `Dashboard/advanced_parser.py` | Parses PCAP files via tshark, extracts packet-level features |
-| `Dashboard/feature_engineer.py` | Groups packets into flows per Source IP, engineers 15 behavioral features |
-| `Dashboard/trainai_rf.py` | Trains Random Forest classifier, saves `rf_model.pkl` + `rf_scaler.pkl` |
-| `Dashboard/trainai.py` | (Legacy) K-Means clustering, kept as fallback |
+| `Dashboard/advanced_parser.py` | Parses PCAP files via tshark, extracts packet-level fields |
+| `Dashboard/feature_engineer.py` | Groups packets into flows per Source IP, derives 18 behavioral features (packet, flow, IAT, session, behavioral) |
+| `Dashboard/trainai_rf.py` | Trains Random Forest classifier, reports DR/FPR/Precision/F1/latency vs spec targets, saves `rf_model.pkl` + `rf_scaler.pkl` |
+| `Dashboard/trainai.py` | Legacy unsupervised K-Means trainer, fallback only |
+| `Dashboard/evaluate_benchmark.py` | Evaluates the trained RF model against a labeled benchmark CSV (CIC-IDS-2017/2018) |
 
 ### Runtime engine
 | File | Purpose |
@@ -43,6 +44,7 @@ A real-time hybrid Intrusion Detection System (IDS) that combines rule-based sig
 | `Dashboard/live_backend.py` | Live capture loop — 2-second tshark windows, flow engineering, hybrid classification, writes alerts to `ids_logs.db` |
 | `Dashboard/app.py` | Streamlit SOC dashboard — live threat table, charts, top talkers, one-click firewall block |
 | `Dashboard/start_system.bat` | Launches the backend and dashboard simultaneously |
+| `Dashboard/debug_flags.py` | Inspect raw tshark output when flag parsing misbehaves |
 
 ## Detection Logic
 
@@ -56,17 +58,27 @@ A real-time hybrid Intrusion Detection System (IDS) that combines rule-based sig
 
 **Random Forest** predicts 0/1/2 (Baseline/Moderate/Severe) with confidence via `predict_proba`. The fusion engine takes the higher severity between RF and heuristics.
 
-## Feature Set (per flow)
+**Multi-window rolling state** tracks per-source-IP aggregates across the last 15 capture windows (~30s) so the engine catches attacks that hide below a single window's pps threshold:
+- `rolling_unique_ports > 60` → Slow Port Scan
+- `rolling_syn > 150` and `rolling_packets > 200` → Sustained SYN / Brute-Force Probe
 
-Packet/session level: `total_packets`, `total_bytes`, `total_syn_flags`, `total_ack_flags`, `total_fin_flags`, `total_rst_flags`, `avg_ttl`, `avg_window_size`.
+**Threat Intelligence Feed** (`threat_intel.txt`, optional): newline-separated known-malicious IPv4 addresses. Any captured source IP on the list is auto-escalated to Severe regardless of behavioral metrics. Populate from AbuseIPDB / FireHOL / Spamhaus DROP / Emerging Threats.
 
-Flow/behavioral level: `flow_duration_sec`, `packets_per_second`, `bytes_per_second`, `avg_packet_size`, `syn_ack_ratio`, `unique_target_ips`, `unique_target_ports`.
+## Feature Set (18 per flow)
+
+| Category | Features |
+|---|---|
+| Packet-level | `total_packets`, `total_bytes`, `avg_packet_size`, `packet_size_std` |
+| Flow-level | `flow_duration_sec`, `packets_per_second`, `bytes_per_second`, `iat_mean`, `iat_std` |
+| Session-level | `total_syn_flags`, `total_ack_flags`, `total_fin_flags`, `total_rst_flags`, `syn_ack_ratio` |
+| Behavioral | `unique_target_ips`, `unique_target_ports` |
+| Network-layer | `avg_ttl`, `avg_window_size` |
 
 ## Running Locally
 
-Requirements: Windows, Wireshark (with tshark at `C:\Program Files\Wireshark\tshark.exe`), Python 3.10+, packages: `pandas`, `scikit-learn`, `joblib`, `streamlit`.
+Requirements: Windows, Wireshark (with tshark at `C:\Program Files\Wireshark\tshark.exe`), Python 3.10+, packages: `pandas`, `numpy`, `scikit-learn`, `joblib`, `streamlit`.
 
-1. **Train the model** (one-time):
+1. **Train the model** (one-time, or re-run after updating feature set):
    ```
    python Dashboard/advanced_parser.py
    python Dashboard/feature_engineer.py
@@ -77,6 +89,10 @@ Requirements: Windows, Wireshark (with tshark at `C:\Program Files\Wireshark\tsh
    Dashboard\start_system.bat
    ```
 3. Open the dashboard at `http://localhost:8501`.
+4. **Optional — benchmark evaluation**:
+   ```
+   python Dashboard/evaluate_benchmark.py <path-to-CIC-IDS-2017.csv>
+   ```
 
 ## Testing With Real Attacks
 
@@ -86,22 +102,36 @@ Validated against a Kali Linux VM (VirtualBox, Bridged networking):
 
 Attack the gateway router (not the host machine) — VirtualBox's bridge driver routes VM-to-host traffic internally, bypassing the physical NIC tshark is listening on.
 
+## Spec Targets vs Implementation
+
+| Metric | Target | Reported by |
+|---|---|---|
+| Detection Rate (TP / (TP+FN)) | > 95% | `trainai_rf.py`, `evaluate_benchmark.py` |
+| False Positive Rate (FP / (FP+TN)) | < 5% | `trainai_rf.py`, `evaluate_benchmark.py` |
+| Precision (TP / (TP+FP)) | > 90% | `trainai_rf.py`, `evaluate_benchmark.py` |
+| F1-Score | > 92% | `trainai_rf.py`, `evaluate_benchmark.py` |
+| Latency per decision | < 10 ms | `trainai_rf.py`, `evaluate_benchmark.py` |
+
 ## Spec Compliance (CMP3602 Deliverables)
 
 | Deliverable | Status |
 |---|---|
 | Packet capture (Wireshark/tshark) | Done |
-| Feature extraction pipeline | Done |
+| Feature extraction pipeline (packet, flow, IAT, session, behavioral) | Done |
 | Signature detection engine | Done |
 | ML behavioral model (Random Forest) | Done |
 | Fusion/decision engine | Done |
 | Real-time processing loop | Done |
 | Alert logging & dashboard | Done |
+| Evaluation against benchmark dataset | Done (`evaluate_benchmark.py`) |
 | Active response (firewall rule push) | Done (Optional v2) |
-| Evaluation against benchmark dataset | In progress |
-| LSTM behavioral model | Pending |
+| LSTM behavioral model | Pending (Optional v2) |
 | SHAP explainability | Pending (Optional v2) |
 | Model retraining pipeline | Pending (Optional v2) |
+
+## Note on Label Source
+
+`trainai_rf.py` derives labels using the same heuristic rules the runtime engine uses (weak supervision) because raw PCAP captures don't ship ground-truth labels. The RF model therefore learns a smoothed, non-linear approximation of the rule boundary and adds calibrated `predict_proba` confidences that the heuristic alone can't provide. For independent validation, use `evaluate_benchmark.py` against CIC-IDS-2017 (or any labeled flow CSV).
 
 ## Data Note
 

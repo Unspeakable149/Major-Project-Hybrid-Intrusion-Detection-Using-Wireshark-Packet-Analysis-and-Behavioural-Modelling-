@@ -47,3 +47,7 @@ image.png
 image (*).png
 Teaching Plan*.pdf
 Hybrid Intrusion Detection*.pdf
+Major_Project_Direction.pdf
+
+# Local test reports (contain network/host specifics)
+TEST_RESULTS.md

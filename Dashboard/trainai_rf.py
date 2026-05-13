@@ -1,5 +1,20 @@
-import pandas as pd
+"""Train the Random Forest behavioral classifier.
+
+Labels are derived heuristically (weak supervision) from velocity + flag
+features because raw PCAPs do not ship ground-truth labels. To validate
+against a true benchmark (CIC-IDS-2017 etc.), use evaluate_benchmark.py.
+
+Spec metric targets (Hybrid IDS pipeline):
+    Detection Rate   > 95%
+    False Positive   <  5%
+    Precision        > 90%
+    F1               > 92%
+    Latency          < 10 ms / decision
+"""
+
+import time
 import numpy as np
+import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
@@ -15,10 +30,12 @@ FEATURE_COLS = [
     'total_packets', 'total_bytes', 'unique_target_ips', 'unique_target_ports',
     'total_syn_flags', 'total_ack_flags', 'total_fin_flags', 'total_rst_flags',
     'avg_ttl', 'avg_window_size', 'flow_duration_sec', 'packets_per_second',
-    'bytes_per_second', 'avg_packet_size', 'syn_ack_ratio'
+    'bytes_per_second', 'avg_packet_size', 'syn_ack_ratio',
+    'packet_size_std', 'iat_mean', 'iat_std',
 ]
 
-def assign_behavioral_label(row):
+
+def assign_behavioral_label(row) -> int:
     pps = row.get('packets_per_second', 0)
     sar = row.get('syn_ack_ratio', 0)
     ports = row.get('unique_target_ports', 0)
@@ -26,100 +43,132 @@ def assign_behavioral_label(row):
 
     if pps > 500 and sar > 5:
         return 2
-    elif pps > 1000:
+    if pps > 1000:
         return 2
-    elif ports > 20:
+    if ports > 20:
         return 1
-    elif pps > 300 and avg_size > 800:
+    if pps > 300 and avg_size > 800:
         return 1
-    elif pps <= 5 and avg_size < 150:
-        return 0
-    else:
-        return 0
+    return 0
 
 
-print("1. Loading Advanced Flow Dataset...")
-df = pd.read_csv("ai_ready_advanced_flows.csv")
-print(f"   Total flow records loaded: {len(df)}")
+def report_target_metrics(y_true, y_pred, latency_ms: float):
+    """Detection Rate, FPR, Precision, F1 vs spec targets.
 
-print("2. Isolating Behavioral Feature Matrix...")
-features = df[FEATURE_COLS].replace([float('inf'), float('-inf')], 0).fillna(0)
+    Treats class 0 as 'benign' and classes 1/2 collectively as 'attack' so
+    the binary detection metrics line up with the project's success criteria.
+    """
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
 
-print("3. Generating Supervised Labels via Behavioral Heuristics...")
-labels = df.apply(assign_behavioral_label, axis=1)
+    attack_true = y_true > 0
+    attack_pred = y_pred > 0
 
-label_dist = labels.value_counts().to_dict()
-for label_id, count in sorted(label_dist.items()):
-    print(f"   Class {label_id} ({LABEL_NAMES[label_id]}): {count} samples")
+    tp = int(((attack_true) & (attack_pred)).sum())
+    fn = int(((attack_true) & (~attack_pred)).sum())
+    fp = int(((~attack_true) & (attack_pred)).sum())
+    tn = int(((~attack_true) & (~attack_pred)).sum())
 
-print("4. Scaling Feature Matrix with StandardScaler...")
-scaler = StandardScaler()
-scaled_features = scaler.fit_transform(features)
+    dr = tp / (tp + fn) if (tp + fn) else 0.0
+    fpr = fp / (fp + tn) if (fp + tn) else 0.0
+    precision = tp / (tp + fp) if (tp + fp) else 0.0
+    recall = dr
+    f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) else 0.0
 
-print("5. Partitioning Dataset (80% Train / 20% Test, Stratified)...")
-try:
-    X_train, X_test, y_train, y_test = train_test_split(
-        scaled_features, labels, test_size=0.2, random_state=42, stratify=labels
+    def mark(value, target, lower_is_better=False):
+        ok = value <= target if lower_is_better else value >= target
+        return "PASS" if ok else "FAIL"
+
+    print("\n   Spec target metrics (attack vs benign, binary view):")
+    print(f"      Detection Rate   : {dr*100:6.2f}%   target > 95%      [{mark(dr, 0.95)}]")
+    print(f"      False Positive   : {fpr*100:6.2f}%   target <  5%      [{mark(fpr, 0.05, lower_is_better=True)}]")
+    print(f"      Precision        : {precision*100:6.2f}%   target > 90%      [{mark(precision, 0.90)}]")
+    print(f"      F1-Score         : {f1*100:6.2f}%   target > 92%      [{mark(f1, 0.92)}]")
+    print(f"      Latency          : {latency_ms:6.3f} ms target < 10 ms    [{mark(latency_ms, 10.0, lower_is_better=True)}]")
+
+
+def main():
+    print("[1/9] Loading flow dataset...")
+    df = pd.read_csv("ai_ready_advanced_flows.csv")
+    print(f"      flow records: {len(df):,}")
+
+    print("[2/9] Selecting feature matrix...")
+    missing = [c for c in FEATURE_COLS if c not in df.columns]
+    if missing:
+        raise SystemExit(
+            f"Missing columns in input CSV: {missing}\n"
+            f"Rerun feature_engineer.py to regenerate the dataset with the current feature set."
+        )
+    features = df[FEATURE_COLS].replace([np.inf, -np.inf], 0).fillna(0)
+
+    print("[3/9] Deriving heuristic (weak-supervision) labels...")
+    labels = df.apply(assign_behavioral_label, axis=1)
+    for label_id, count in sorted(labels.value_counts().to_dict().items()):
+        print(f"      class {label_id} ({LABEL_NAMES[label_id]}): {count}")
+
+    print("[4/9] Scaling features (StandardScaler)...")
+    scaler = StandardScaler()
+    scaled = scaler.fit_transform(features)
+
+    print("[5/9] Splitting train/test (80/20, stratified where possible)...")
+    try:
+        X_train, X_test, y_train, y_test = train_test_split(
+            scaled, labels, test_size=0.2, random_state=42, stratify=labels
+        )
+    except ValueError:
+        X_train, X_test, y_train, y_test = train_test_split(
+            scaled, labels, test_size=0.2, random_state=42
+        )
+    print(f"      train: {len(X_train)}  test: {len(X_test)}")
+
+    print("[6/9] Training RandomForestClassifier (100 trees, balanced weights)...")
+    model = RandomForestClassifier(
+        n_estimators=100, random_state=42, n_jobs=-1, class_weight='balanced'
     )
-except ValueError:
-    X_train, X_test, y_train, y_test = train_test_split(
-        scaled_features, labels, test_size=0.2, random_state=42
-    )
+    model.fit(X_train, y_train)
 
-print(f"   Training set: {len(X_train)} samples")
-print(f"   Test set:     {len(X_test)} samples")
+    print("[7/9] Evaluating on held-out test set...")
+    # Latency: average per-decision predict time on the test split.
+    t0 = time.perf_counter()
+    y_pred = model.predict(X_test)
+    elapsed = time.perf_counter() - t0
+    per_decision_ms = (elapsed / max(len(X_test), 1)) * 1000.0
 
-print("6. Training Random Forest Classifier (100 estimators, balanced class weights)...")
-rf_model = RandomForestClassifier(
-    n_estimators=100,
-    random_state=42,
-    n_jobs=-1,
-    class_weight='balanced'
-)
-rf_model.fit(X_train, y_train)
+    acc = accuracy_score(y_test, y_pred)
+    present = sorted(labels.unique())
+    print(f"\n   Accuracy: {acc*100:.2f}%")
+    print("\n   Per-class classification report:")
+    print(classification_report(
+        y_test, y_pred, labels=present, target_names=[LABEL_NAMES[i] for i in present], zero_division=0
+    ))
+    print("   Confusion matrix:")
+    print(f"   labels={[LABEL_NAMES[i] for i in present]}")
+    print(f"   {confusion_matrix(y_test, y_pred, labels=present)}")
 
-print("7. Evaluating Model Performance on Held-Out Test Set...")
-y_pred = rf_model.predict(X_test)
-accuracy = accuracy_score(y_test, y_pred)
+    report_target_metrics(y_test, y_pred, per_decision_ms)
 
-present_classes = sorted(labels.unique())
-present_names = [LABEL_NAMES[i] for i in present_classes]
+    print("\n[8/9] Feature importance ranking:")
+    importance = pd.DataFrame({
+        'feature': FEATURE_COLS,
+        'importance': model.feature_importances_,
+    }).sort_values('importance', ascending=False)
+    for _, r in importance.iterrows():
+        bar = '#' * int(r['importance'] * 60)
+        print(f"      {r['feature']:22s} {r['importance']:.4f}  {bar}")
 
-print(f"\n   Overall Accuracy: {accuracy:.4f} ({accuracy * 100:.2f}%)")
-print("\n   Full Classification Report:")
-print(classification_report(
-    y_test, y_pred,
-    labels=present_classes,
-    target_names=present_names,
-    zero_division=0
-))
+    print("\n[9/9] Saving artifacts...")
+    joblib.dump(model, "rf_model.pkl")
+    joblib.dump(scaler, "rf_scaler.pkl")
+    print("      wrote rf_model.pkl, rf_scaler.pkl")
 
-print("   Confusion Matrix:")
-cm = confusion_matrix(y_test, y_pred, labels=present_classes)
-print(f"   Labels: {present_names}")
-print(f"   {cm}")
+    print("\n" + "=" * 60)
+    print("TRAINING COMPLETE")
+    print("=" * 60)
+    print(f"  accuracy : {acc*100:.2f}%")
+    print(f"  latency  : {per_decision_ms:.3f} ms / decision")
+    print(f"  features : {len(FEATURE_COLS)}")
+    print("=" * 60)
 
-print("\n8. Feature Importance Rankings (Descending):")
-importance_df = pd.DataFrame({
-    'Feature': FEATURE_COLS,
-    'Importance': rf_model.feature_importances_
-}).sort_values('Importance', ascending=False)
 
-for _, row in importance_df.iterrows():
-    bar_length = int(row['Importance'] * 60)
-    bar = '#' * bar_length
-    print(f"   {row['Feature']:30s}  {row['Importance']:.4f}  {bar}")
-
-print("\n9. Serializing Model Artifacts...")
-joblib.dump(rf_model, "rf_model.pkl")
-joblib.dump(scaler, "rf_scaler.pkl")
-
-print("\n" + "=" * 60)
-print("TRAINING COMPLETE")
-print("=" * 60)
-print(f"  Training samples:  {len(X_train)}")
-print(f"  Test samples:      {len(X_test)}")
-print(f"  Final accuracy:    {accuracy * 100:.2f}%")
-print(f"  Model artifact:    rf_model.pkl")
-print(f"  Scaler artifact:   rf_scaler.pkl")
-print("=" * 60)
+if __name__ == "__main__":
+    main()
