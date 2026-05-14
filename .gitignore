@@ -52,6 +52,7 @@ Major_Project_Direction.pdf
 # Local test reports + planning docs (contain network/host specifics or personal notes)
 TEST_RESULTS.md
 WEEKLY_JOURNALS.md
+WEEKLY_JOURNALS_V2.md
 EXTRA_FEATURES.md
 
 # Installer build artifacts (PyInstaller + Inno Setup output)
@@ -68,3 +69,9 @@ launcher.log
 
 # Notifier secrets (SMTP creds, webhook URLs) — template ships as .example
 Dashboard/notifier_config.json
+
+# Operator-specific baseline whitelist (real host/network IPs) — template ships as .example
+Dashboard/baseline.txt
+
+# Claude Code project-instruction file (local-only)
+CLAUDE.md
