@@ -49,8 +49,10 @@ Teaching Plan*.pdf
 Hybrid Intrusion Detection*.pdf
 Major_Project_Direction.pdf
 
-# Local test reports (contain network/host specifics)
+# Local test reports + planning docs (contain network/host specifics or personal notes)
 TEST_RESULTS.md
+WEEKLY_JOURNALS.md
+EXTRA_FEATURES.md
 
 # Installer build artifacts (PyInstaller + Inno Setup output)
 build/
@@ -63,3 +65,6 @@ Hybrid IDS/
 
 # Launcher runtime log
 launcher.log
+
+# Notifier secrets (SMTP creds, webhook URLs) — template ships as .example
+Dashboard/notifier_config.json

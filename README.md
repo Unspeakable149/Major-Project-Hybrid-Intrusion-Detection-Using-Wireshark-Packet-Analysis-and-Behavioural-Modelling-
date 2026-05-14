@@ -46,6 +46,20 @@ A real-time hybrid Intrusion Detection System (IDS) that combines rule-based sig
 | `Dashboard/start_system.bat` | Launches the backend and dashboard simultaneously |
 | `Dashboard/debug_flags.py` | Inspect raw tshark output when flag parsing misbehaves |
 
+## Extra Features (Post-v1.0 Enhancements)
+
+A second track of opt-in features sits alongside the v1.0 core path. Every feature is silent / no-op when its config file is missing, so the baseline IDS behaviour is preserved when nothing is configured.
+
+| # | Feature | Module | Purpose |
+|---|---------|--------|---------|
+| 6 | Severe-Alert Notifier | `Dashboard/notifier.py` + `notifier_config.json` | Pushes Severe verdicts off the box via SMTP / Discord / Slack with one-per-hour throttling per `(source IP, channel)`. |
+| 7 | Offline PCAP Replay Mode | `Dashboard/live_backend.py --replay <pcap>` | Reads a static PCAP through the same pipeline as live capture for reproducible demos and grading runs. `--realtime` adds live-cadence sleeps for video recordings. |
+| 8 | Baseline Whitelist | `Dashboard/baseline.txt` | Newline-separated known-good IPs are auto-classified `Baseline (Safe) / Whitelisted Source`, suppressing false positives on gateway / DNS / dashboard hosts. Intel still wins. |
+| 9 | Unit Test Suite | `tests/` + `pytest.ini` + `conftest.py` | 17 pytest cases pinning `classify_profile`, `slow_attack_check`, `dns_tunnel_check`, and `engineer_flows`. Threshold drift fails loud in under a second. |
+| 10 | Per-Protocol Breakdown Panel | `protocol_breakdown` table + `app.py` panel + `dns_tunnel_check()` | Aggregates packets/bytes per `(Source IP, Protocol)` each window. Dashboard bar chart per IP. Detects DNS-tunnel C2 (T1071.004) when DNS pps > 30. |
+
+Each feature is wired so the core v1.0.0 path stays unchanged when its config / file / data is absent. See the paragraphs under **Detection Logic** for runtime details and the section under **Running Locally** for CLI entry points.
+
 ## Detection Logic
 
 **Heuristic rules** (`classify_profile()` in `live_backend.py`):
@@ -63,6 +77,14 @@ A real-time hybrid Intrusion Detection System (IDS) that combines rule-based sig
 - `rolling_syn > 150` and `rolling_packets > 200` → Sustained SYN / Brute-Force Probe
 
 **Threat Intelligence Feed** (`threat_intel.txt`, optional): newline-separated known-malicious IPv4 addresses. Any captured source IP on the list is auto-escalated to Severe regardless of behavioral metrics. Populate from AbuseIPDB / FireHOL / Spamhaus DROP / Emerging Threats.
+
+**Baseline Whitelist** (`baseline.txt`, optional): newline-separated known-good IPv4 addresses (gateway, internal DNS, dashboard host). Matching source IPs are forced to Baseline (Safe) with profile `Whitelisted Source` even when rule / RF would have elevated them — eliminates false positives from speed tests or OS updates on infrastructure you control. Precedence is `intel > baseline > rule/RF`, so a whitelisted IP that *also* appears on the threat-intel feed still escalates to Severe. Copy `Dashboard/baseline.txt.example` to `Dashboard/baseline.txt` and list one IP per line.
+
+**Severe-Alert Notifier** (`notifier.py`, optional): pushes Severe alerts out of the dashboard via SMTP email, Discord webhook, and/or Slack webhook. Throttled to one notification per (source IP, channel) per hour to prevent alert storms during sustained attacks. Copy `Dashboard/notifier_config.json.example` to `Dashboard/notifier_config.json` and enable the channels you need (the real config file is gitignored so credentials never enter source control). Missing or malformed config silently disables the notifier — the IDS keeps running.
+
+**Per-Protocol Breakdown + DNS Tunnel Detector**: every capture window also aggregates packets and bytes by `(Source IP, Protocol)` and persists them to a sibling SQLite table `protocol_breakdown`, leaving `live_threat_logs` untouched. The dashboard surfaces this as an interactive panel below Top Talkers — pick a source IP, see its traffic mix as a bar chart, instantly distinguish a normal web client (mostly TCP/HTTP/TLS) from an exfil channel (skewed toward DNS). A new `dns_tunnel_check()` layer fires when DNS pps from a single source exceeds 30 in a 2-second window (T1071.004 / DNS-over-application-layer C2) and labels the flow `DNS Tunnel / C2 Channel — Moderate (Suspicious)`. Precedence is `intel > baseline > dns_tunnel > slow > rule/RF`, so threat-intel hits and whitelisted infrastructure are unaffected.
+
+**Unit Test Suite** (`tests/`): a pytest suite pins the heuristic rule engine and the flow feature builder so threshold drift fails loud. `tests/test_classifier.py` asserts exact `(profile, threat)` tuples returned by `classify_profile()`, `slow_attack_check()`, and `dns_tunnel_check()`; `tests/test_engineer.py` exercises `engineer_flows()` against the three input shapes most likely to crash the live loop (empty DataFrame, all-blank `Source IP`, single-packet flow). 17 tests total, runs in under a second, no tshark / model / DB dependency. Run with `python -m pytest tests/ -v` from the repo root. The suite is pure-function, requires no admin shell, and is CI-friendly — a regression in rule thresholds or feature engineering fails the build instead of slipping into production.
 
 ## Feature Set (18 per flow)
 
@@ -104,6 +126,12 @@ Requirements: Windows, Wireshark (with tshark at `C:\Program Files\Wireshark\tsh
    ```
    python Dashboard/evaluate_benchmark.py <path-to-CIC-IDS-2017.csv>
    ```
+5. **Optional — offline PCAP replay** (reproducible demos / grading without live attacker setup):
+   ```
+   python Dashboard/live_backend.py --replay path\to\capture.pcap
+   python Dashboard/live_backend.py --replay path\to\capture.pcap --realtime
+   ```
+   Replay walks the PCAP in `WINDOW_SECONDS`-wide chunks through the same flow-engineering + classification + alerting pipeline as live mode. `--realtime` sleeps between windows so the dashboard timeline animates as it would during a live capture; omit it to process at full CPU speed.
 
 ## Testing With Real Attacks
 

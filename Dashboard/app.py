@@ -242,6 +242,28 @@ with tab1:
                 st.dataframe(top_ips, use_container_width=True, hide_index=True)
 
             st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
+            st.markdown('<p class="threat-header">Per-Protocol Breakdown</p>', unsafe_allow_html=True)
+            selected_ip = st.selectbox(
+                "Inspect Source IP",
+                logs_df["Source IP"].unique(),
+                key="per_proto_ip",
+            )
+            try:
+                proto_conn = sqlite3.connect('ids_logs.db', timeout=15)
+                proto_df = pd.read_sql_query(
+                    "SELECT protocol, SUM(packets) AS pkts FROM protocol_breakdown "
+                    "WHERE source_ip = ? GROUP BY protocol",
+                    proto_conn, params=[selected_ip],
+                )
+                proto_conn.close()
+            except Exception:
+                proto_df = pd.DataFrame()
+            if not proto_df.empty:
+                st.bar_chart(proto_df.set_index("protocol"))
+            else:
+                st.info("No per-protocol data yet for this IP.")
+
+            st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
             st.markdown('<p class="threat-header">Threat Activity Timeline</p>', unsafe_allow_html=True)
 
             timeline_df = logs_df.copy()
